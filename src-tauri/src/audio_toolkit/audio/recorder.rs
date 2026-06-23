@@ -18,16 +18,73 @@ use crate::audio_toolkit::{
     vad::{self, VadFrame},
     VoiceActivityDetector,
 };
+use tokio::sync::mpsc::UnboundedSender;
 
 enum Cmd {
-    Start,
+    Start { flush: Option<FlushOptions> },
     Stop(mpsc::Sender<Vec<f32>>),
     Shutdown,
+}
+
+struct FlushOptions {
+    silence_frames: usize,
+    tx: UnboundedSender<Vec<f32>>,
 }
 
 enum AudioChunk {
     Samples(Vec<f32>),
     EndOfStream,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProcessedFrame {
+    Speech,
+    Noise,
+}
+
+struct ActiveFlush {
+    silence_frames: usize,
+    tx: UnboundedSender<Vec<f32>>,
+    silence_count: usize,
+    has_speech: bool,
+}
+
+impl ActiveFlush {
+    fn new(options: FlushOptions) -> Self {
+        Self {
+            silence_frames: options.silence_frames,
+            tx: options.tx,
+            silence_count: 0,
+            has_speech: false,
+        }
+    }
+
+    fn observe(&mut self, frame: ProcessedFrame, processed_samples: &mut Vec<f32>) -> bool {
+        match frame {
+            ProcessedFrame::Speech => {
+                self.silence_count = 0;
+                if !processed_samples.is_empty() {
+                    self.has_speech = true;
+                }
+            }
+            ProcessedFrame::Noise if self.has_speech => {
+                self.silence_count += 1;
+                if self.silence_count >= self.silence_frames && !processed_samples.is_empty() {
+                    let _ = self.tx.send(std::mem::take(processed_samples));
+                    self.silence_count = 0;
+                    self.has_speech = false;
+                    return true;
+                }
+            }
+            ProcessedFrame::Noise => {}
+        }
+
+        false
+    }
+}
+
+fn silence_frames_for_gap(gap_ms: u64) -> usize {
+    ((gap_ms + 29) / 30).max(1) as usize
 }
 
 pub struct AudioRecorder {
@@ -196,8 +253,21 @@ impl AudioRecorder {
     }
 
     pub fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.start_with_flush(None, None)
+    }
+
+    pub fn start_with_flush(
+        &self,
+        flush_gap_ms: Option<u64>,
+        flush_tx: Option<UnboundedSender<Vec<f32>>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let flush = flush_gap_ms.zip(flush_tx).map(|(gap_ms, tx)| FlushOptions {
+            silence_frames: silence_frames_for_gap(gap_ms),
+            tx,
+        });
+
         if let Some(tx) = &self.cmd_tx {
-            tx.send(Cmd::Start)?;
+            tx.send(Cmd::Start { flush })?;
         }
         Ok(())
     }
@@ -408,6 +478,7 @@ fn run_consumer(
 
     let mut processed_samples = Vec::<f32>::new();
     let mut recording = false;
+    let mut active_flush: Option<ActiveFlush> = None;
 
     // ---------- spectrum visualisation setup ---------------------------- //
     const BUCKETS: usize = 16;
@@ -435,19 +506,23 @@ fn run_consumer(
         recording: bool,
         vad: &Option<Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>>,
         out_buf: &mut Vec<f32>,
-    ) {
+    ) -> Option<ProcessedFrame> {
         if !recording {
-            return;
+            return None;
         }
 
         if let Some(vad_arc) = vad {
             let mut det = vad_arc.lock().unwrap();
             match det.push_frame(samples).unwrap_or(VadFrame::Speech(samples)) {
-                VadFrame::Speech(buf) => out_buf.extend_from_slice(buf),
-                VadFrame::Noise => {}
+                VadFrame::Speech(buf) => {
+                    out_buf.extend_from_slice(buf);
+                    Some(ProcessedFrame::Speech)
+                }
+                VadFrame::Noise => Some(ProcessedFrame::Noise),
             }
         } else {
             out_buf.extend_from_slice(samples);
+            Some(ProcessedFrame::Speech)
         }
     }
 
@@ -471,16 +546,27 @@ fn run_consumer(
 
         // ---------- existing pipeline ------------------------------------ //
         frame_resampler.push(&raw, &mut |frame: &[f32]| {
-            handle_frame(frame, recording, &vad, &mut processed_samples)
+            if let Some(processed_frame) =
+                handle_frame(frame, recording, &vad, &mut processed_samples)
+            {
+                if let Some(flush) = active_flush.as_mut() {
+                    if flush.observe(processed_frame, &mut processed_samples) {
+                        if let Some(v) = &vad {
+                            v.lock().unwrap().reset();
+                        }
+                    }
+                }
+            }
         });
 
         // non-blocking check for a command
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
-                Cmd::Start => {
+                Cmd::Start { flush } => {
                     stop_flag.store(false, Ordering::Relaxed);
                     processed_samples.clear();
                     recording = true;
+                    active_flush = flush.map(ActiveFlush::new);
                     visualizer.reset();
                     if let Some(v) = &vad {
                         v.lock().unwrap().reset();
@@ -488,6 +574,7 @@ fn run_consumer(
                 }
                 Cmd::Stop(reply_tx) => {
                     recording = false;
+                    active_flush = None;
                     stop_flag.store(true, Ordering::Relaxed);
 
                     // Drain all remaining audio until the producer confirms end-of-stream.
@@ -498,7 +585,7 @@ fn run_consumer(
                         match sample_rx.recv_timeout(Duration::from_secs(2)) {
                             Ok(AudioChunk::Samples(remaining)) => {
                                 frame_resampler.push(&remaining, &mut |frame: &[f32]| {
-                                    handle_frame(frame, true, &vad, &mut processed_samples)
+                                    let _ = handle_frame(frame, true, &vad, &mut processed_samples);
                                 });
                             }
                             Ok(AudioChunk::EndOfStream) => break,
@@ -510,7 +597,7 @@ fn run_consumer(
                     }
 
                     frame_resampler.finish(&mut |frame: &[f32]| {
-                        handle_frame(frame, true, &vad, &mut processed_samples)
+                        let _ = handle_frame(frame, true, &vad, &mut processed_samples);
                     });
 
                     let _ = reply_tx.send(std::mem::take(&mut processed_samples));
@@ -525,5 +612,39 @@ fn run_consumer(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use super::{silence_frames_for_gap, ActiveFlush, FlushOptions, ProcessedFrame};
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn converts_gap_ms_to_frame_count() {
+        assert_eq!(silence_frames_for_gap(1_000), 34);
+        assert_eq!(silence_frames_for_gap(2_000), 67);
+        assert_eq!(silence_frames_for_gap(5_000), 167);
+    }
+
+    #[test]
+    fn flush_requires_speech_before_silence() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut flush = ActiveFlush::new(FlushOptions {
+            silence_frames: 2,
+            tx,
+        });
+        let mut samples = Vec::new();
+
+        assert!(!flush.observe(ProcessedFrame::Noise, &mut samples));
+        assert!(!flush.observe(ProcessedFrame::Noise, &mut samples));
+        assert!(rx.try_recv().is_err());
+
+        samples.extend_from_slice(&[0.1, 0.2]);
+        assert!(!flush.observe(ProcessedFrame::Speech, &mut samples));
+        assert!(!flush.observe(ProcessedFrame::Noise, &mut samples));
+        assert!(flush.observe(ProcessedFrame::Noise, &mut samples));
+        assert!(samples.is_empty());
+        assert_eq!(rx.try_recv().unwrap(), vec![0.1, 0.2]);
     }
 }

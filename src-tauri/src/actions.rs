@@ -5,7 +5,9 @@ use crate::audio_toolkit::{is_microphone_access_denied, is_no_input_device_error
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::{get_settings, AppSettings, APPLE_INTELLIGENCE_PROVIDER_ID};
+use crate::settings::{
+    get_settings, AppSettings, FlushPostProcessContext, APPLE_INTELLIGENCE_PROVIDER_ID,
+};
 use crate::shortcut;
 use crate::tray::{change_tray_icon, TrayIconState};
 use crate::utils::{
@@ -16,10 +18,14 @@ use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use log::{debug, error, warn};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::time::{Duration, Instant};
 use tauri::Manager;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 
 #[derive(Clone, serde::Serialize)]
 struct RecordingErrorEvent {
@@ -49,6 +55,34 @@ struct TranscribeAction {
     post_process: bool,
 }
 
+struct FlushSession {
+    cancelled: Arc<AtomicBool>,
+    done_rx: oneshot::Receiver<FlushWorkerResult>,
+}
+
+struct FlushWorkerResult {
+    emitted_text: String,
+    inserted_any: bool,
+    next_chunk_index: u64,
+}
+
+static FLUSH_SESSIONS: Lazy<Mutex<HashMap<String, FlushSession>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+pub(crate) fn cancel_flush_sessions() {
+    let sessions = {
+        let mut guard = FLUSH_SESSIONS.lock().unwrap();
+        guard
+            .drain()
+            .map(|(_, session)| session)
+            .collect::<Vec<_>>()
+    };
+
+    for session in sessions {
+        session.cancelled.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Field name for structured output JSON schema
 const TRANSCRIPTION_FIELD: &str = "transcription";
 
@@ -63,7 +97,32 @@ fn build_system_prompt(prompt_template: &str) -> String {
     prompt_template.replace("${output}", "").trim().to_string()
 }
 
-async fn post_process_transcription(settings: &AppSettings, transcription: &str) -> Option<String> {
+fn flush_context_input(transcription: &str, prior_context: Option<&str>) -> String {
+    match prior_context.filter(|context| !context.trim().is_empty()) {
+        Some(context) => format!(
+            "Previous finalized text for context:\n{}\n\nCurrent chunk to clean and return:\n{}",
+            context, transcription
+        ),
+        None => transcription.to_string(),
+    }
+}
+
+fn flush_context_instruction(prior_context: Option<&str>) -> &'static str {
+    if prior_context
+        .map(|context| !context.trim().is_empty())
+        .unwrap_or(false)
+    {
+        "\nUse the previous finalized text only for context. Return only the cleaned current chunk."
+    } else {
+        ""
+    }
+}
+
+async fn post_process_transcription(
+    settings: &AppSettings,
+    transcription: &str,
+    prior_context: Option<&str>,
+) -> Option<String> {
     let provider = match settings.active_post_process_provider().cloned() {
         Some(provider) => provider,
         None => {
@@ -144,8 +203,12 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     if provider.supports_structured_output {
         debug!("Using structured outputs for provider '{}'", provider.id);
 
-        let system_prompt = build_system_prompt(&prompt);
-        let user_content = transcription.to_string();
+        let system_prompt = format!(
+            "{}{}",
+            build_system_prompt(&prompt),
+            flush_context_instruction(prior_context)
+        );
+        let user_content = flush_context_input(transcription, prior_context);
 
         // Handle Apple Intelligence separately since it uses native Swift APIs
         if provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
@@ -259,7 +322,12 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     }
 
     // Legacy mode: Replace ${output} variable in the prompt with the actual text
-    let processed_prompt = prompt.replace("${output}", transcription);
+    let user_content = flush_context_input(transcription, prior_context);
+    let processed_prompt = format!(
+        "{}{}",
+        prompt.replace("${output}", &user_content),
+        flush_context_instruction(prior_context)
+    );
     debug!("Processed prompt length: {} chars", processed_prompt.len());
 
     match crate::llm_client::send_chat_completion(
@@ -361,7 +429,8 @@ pub(crate) async fn process_transcription_output(
     }
 
     if post_process {
-        if let Some(processed_text) = post_process_transcription(&settings, &final_text).await {
+        if let Some(processed_text) = post_process_transcription(&settings, &final_text, None).await
+        {
             post_processed_text = Some(processed_text.clone());
             final_text = processed_text;
 
@@ -384,6 +453,397 @@ pub(crate) async fn process_transcription_output(
         post_processed_text,
         post_process_prompt,
     }
+}
+
+pub(crate) async fn process_flush_transcription_output(
+    app: &AppHandle,
+    transcription: &str,
+    post_process: bool,
+    prior_context: &str,
+) -> ProcessedTranscription {
+    let settings = get_settings(app);
+    let mut final_text = transcription.to_string();
+    let mut post_processed_text: Option<String> = None;
+    let mut post_process_prompt: Option<String> = None;
+
+    if let Some(converted_text) = maybe_convert_chinese_variant(&settings, transcription).await {
+        final_text = converted_text;
+    }
+
+    if post_process {
+        let llm_context = match settings.flush_post_process_context {
+            FlushPostProcessContext::FullSession if !prior_context.trim().is_empty() => {
+                Some(prior_context)
+            }
+            _ => None,
+        };
+
+        if let Some(processed_text) =
+            post_process_transcription(&settings, &final_text, llm_context).await
+        {
+            post_processed_text = Some(processed_text.clone());
+            final_text = processed_text;
+
+            if let Some(prompt_id) = &settings.post_process_selected_prompt_id {
+                if let Some(prompt) = settings
+                    .post_process_prompts
+                    .iter()
+                    .find(|prompt| &prompt.id == prompt_id)
+                {
+                    post_process_prompt = Some(prompt.prompt.clone());
+                }
+            }
+        }
+    } else if final_text != transcription {
+        post_processed_text = Some(final_text.clone());
+    }
+
+    ProcessedTranscription {
+        final_text,
+        post_processed_text,
+        post_process_prompt,
+    }
+}
+
+const FLUSH_MIN_SAMPLE_COUNT: usize = 16_000;
+
+fn pad_short_flush_samples(mut samples: Vec<f32>) -> Vec<f32> {
+    if samples.len() < FLUSH_MIN_SAMPLE_COUNT && !samples.is_empty() {
+        samples.resize(FLUSH_MIN_SAMPLE_COUNT * 5 / 4, 0.0);
+    }
+    samples
+}
+
+fn append_emitted_text(emitted_text: &mut String, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+
+    if !emitted_text.is_empty() {
+        emitted_text.push('\n');
+    }
+    emitted_text.push_str(text);
+}
+
+async fn paste_without_auto_submit(app: &AppHandle, text: String) -> bool {
+    let (tx, rx) = oneshot::channel();
+    let ah = app.clone();
+    let run_result = app.run_on_main_thread(move || {
+        let result = utils::paste_without_auto_submit(text, ah.clone());
+        let _ = tx.send(result);
+    });
+
+    if let Err(e) = run_result {
+        error!("Failed to run flush paste on main thread: {:?}", e);
+        return false;
+    }
+
+    match rx.await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            error!("Failed to paste flush transcription: {}", e);
+            let _ = app.emit("paste-error", ());
+            false
+        }
+        Err(e) => {
+            error!("Flush paste result channel closed: {}", e);
+            false
+        }
+    }
+}
+
+async fn send_final_auto_submit(app: &AppHandle) {
+    let (tx, rx) = oneshot::channel();
+    let ah = app.clone();
+    let run_result = app.run_on_main_thread(move || {
+        let result = utils::send_auto_submit_if_enabled(ah.clone());
+        let _ = tx.send(result);
+    });
+
+    if let Err(e) = run_result {
+        error!("Failed to run auto-submit on main thread: {:?}", e);
+        return;
+    }
+
+    match rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            error!("Failed to auto-submit flush transcription: {}", e);
+            let _ = app.emit("paste-error", ());
+        }
+        Err(e) => error!("Flush auto-submit result channel closed: {}", e),
+    }
+}
+
+async fn process_flush_chunk(
+    app: &AppHandle,
+    tm: &Arc<TranscriptionManager>,
+    hm: &Arc<HistoryManager>,
+    samples: Vec<f32>,
+    post_process: bool,
+    prior_context: &str,
+    chunk_index: u64,
+    cancelled: &Arc<AtomicBool>,
+) -> Option<String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let samples = pad_short_flush_samples(samples);
+    if samples.is_empty() {
+        return None;
+    }
+
+    let sample_count = samples.len();
+    let file_name = format!(
+        "handy-{}-flush-{}.wav",
+        chrono::Utc::now().timestamp_millis(),
+        chunk_index
+    );
+    let wav_path = hm.recordings_dir().join(&file_name);
+    let wav_path_for_verify = wav_path.clone();
+    let samples_for_wav = samples.clone();
+    let wav_handle = tauri::async_runtime::spawn_blocking(move || {
+        crate::audio_toolkit::save_wav_file(&wav_path, &samples_for_wav)
+    });
+
+    let transcription_time = Instant::now();
+    let transcription_result = tm.transcribe_keep_loaded(samples);
+
+    let wav_saved = match wav_handle.await {
+        Ok(Ok(())) => {
+            match crate::audio_toolkit::verify_wav_file(&wav_path_for_verify, sample_count) {
+                Ok(()) => true,
+                Err(e) => {
+                    error!("Flush WAV verification failed: {}", e);
+                    false
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            error!("Failed to save flush WAV file: {}", e);
+            false
+        }
+        Err(e) => {
+            error!("Flush WAV save task panicked: {}", e);
+            false
+        }
+    };
+
+    if cancelled.load(Ordering::Relaxed) {
+        return None;
+    }
+
+    match transcription_result {
+        Ok(transcription) => {
+            debug!(
+                "Flush transcription completed in {:?}: '{}'",
+                transcription_time.elapsed(),
+                transcription
+            );
+
+            let processed = process_flush_transcription_output(
+                app,
+                &transcription,
+                post_process,
+                prior_context,
+            )
+            .await;
+
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+
+            if wav_saved {
+                if let Err(err) = hm.save_entry(
+                    file_name,
+                    transcription,
+                    post_process,
+                    processed.post_processed_text.clone(),
+                    processed.post_process_prompt.clone(),
+                ) {
+                    error!("Failed to save flush history entry: {}", err);
+                }
+            }
+
+            if processed.final_text.is_empty() {
+                return None;
+            }
+
+            if paste_without_auto_submit(app, processed.final_text.clone()).await {
+                Some(processed.final_text)
+            } else {
+                None
+            }
+        }
+        Err(err) => {
+            debug!("Flush transcription error: {}", err);
+            if wav_saved {
+                if let Err(save_err) =
+                    hm.save_entry(file_name, String::new(), post_process, None, None)
+                {
+                    error!("Failed to save failed flush history entry: {}", save_err);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn start_flush_worker(
+    app: &AppHandle,
+    binding_id: String,
+    mut rx: UnboundedReceiver<Vec<f32>>,
+    post_process: bool,
+) {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (done_tx, done_rx) = oneshot::channel();
+
+    if let Some(old_session) = FLUSH_SESSIONS.lock().unwrap().insert(
+        binding_id.clone(),
+        FlushSession {
+            cancelled: cancelled.clone(),
+            done_rx,
+        },
+    ) {
+        old_session.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    let ah = app.clone();
+    let tm = Arc::clone(&app.state::<Arc<TranscriptionManager>>());
+    let hm = Arc::clone(&app.state::<Arc<HistoryManager>>());
+
+    tauri::async_runtime::spawn(async move {
+        let mut emitted_text = String::new();
+        let mut inserted_any = false;
+        let mut next_chunk_index = 0_u64;
+
+        while let Some(samples) = rx.recv().await {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+
+            utils::emit_flush_pending_chunks(&ah, rx.len() + 1);
+
+            let processed_text = {
+                let chunk_future = process_flush_chunk(
+                    &ah,
+                    &tm,
+                    &hm,
+                    samples,
+                    post_process,
+                    &emitted_text,
+                    next_chunk_index,
+                    &cancelled,
+                );
+                tokio::pin!(chunk_future);
+
+                let mut ticker = tokio::time::interval(Duration::from_millis(250));
+                loop {
+                    tokio::select! {
+                        result = &mut chunk_future => break result,
+                        _ = ticker.tick() => {
+                            utils::emit_flush_pending_chunks(&ah, rx.len() + 1);
+                        }
+                    }
+                }
+            };
+
+            utils::emit_flush_pending_chunks(&ah, rx.len());
+
+            if let Some(text) = processed_text {
+                append_emitted_text(&mut emitted_text, &text);
+                inserted_any = true;
+            }
+
+            next_chunk_index += 1;
+        }
+
+        utils::emit_flush_pending_chunks(&ah, 0);
+
+        let _ = done_tx.send(FlushWorkerResult {
+            emitted_text,
+            inserted_any,
+            next_chunk_index,
+        });
+    });
+}
+
+fn take_flush_session(binding_id: &str) -> Option<FlushSession> {
+    FLUSH_SESSIONS.lock().unwrap().remove(binding_id)
+}
+
+fn start_flush_worker_if_needed(
+    app: &AppHandle,
+    binding_id: &str,
+    post_process: bool,
+    flush_rx: Option<UnboundedReceiver<Vec<f32>>>,
+) {
+    if let Some(rx) = flush_rx {
+        start_flush_worker(app, binding_id.to_string(), rx, post_process);
+    }
+}
+
+async fn finish_flush_session(
+    app: AppHandle,
+    tm: Arc<TranscriptionManager>,
+    hm: Arc<HistoryManager>,
+    samples: Option<Vec<f32>>,
+    post_process: bool,
+    session: FlushSession,
+) {
+    let worker_result = match session.done_rx.await {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Flush worker result channel closed: {}", e);
+            FlushWorkerResult {
+                emitted_text: String::new(),
+                inserted_any: false,
+                next_chunk_index: 0,
+            }
+        }
+    };
+
+    let emitted_text = worker_result.emitted_text;
+    let mut inserted_any = worker_result.inserted_any;
+
+    if !session.cancelled.load(Ordering::Relaxed) {
+        if let Some(samples) = samples {
+            if !samples.is_empty() {
+                utils::emit_flush_pending_chunks(&app, 1);
+            }
+
+            if process_flush_chunk(
+                &app,
+                &tm,
+                &hm,
+                samples,
+                post_process,
+                &emitted_text,
+                worker_result.next_chunk_index,
+                &session.cancelled,
+            )
+            .await
+            .is_some()
+            {
+                inserted_any = true;
+            }
+
+            utils::emit_flush_pending_chunks(&app, 0);
+        }
+    }
+
+    if session.cancelled.load(Ordering::Relaxed) {
+        utils::emit_flush_pending_chunks(&app, 0);
+    }
+
+    if inserted_any && !session.cancelled.load(Ordering::Relaxed) {
+        send_final_auto_submit(&app).await;
+    }
+
+    tm.maybe_unload_immediately("flush session");
+    utils::hide_recording_overlay(&app);
+    change_tray_icon(&app, TrayIconState::Idle);
 }
 
 impl ShortcutAction for TranscribeAction {
@@ -426,9 +886,14 @@ impl ShortcutAction for TranscribeAction {
                 rm_clone.apply_mute();
             });
 
-            if let Err(e) = rm.try_start_recording(&binding_id) {
-                debug!("Recording failed: {}", e);
-                recording_error = Some(e);
+            match rm.try_start_recording(&binding_id) {
+                Ok(flush_rx) => {
+                    start_flush_worker_if_needed(app, &binding_id, self.post_process, flush_rx);
+                }
+                Err(e) => {
+                    debug!("Recording failed: {}", e);
+                    recording_error = Some(e);
+                }
             }
         } else {
             // On-demand mode: Start recording first, then play audio feedback, then apply mute
@@ -436,8 +901,9 @@ impl ShortcutAction for TranscribeAction {
             debug!("On-demand mode: Starting recording first, then audio feedback");
             let recording_start_time = Instant::now();
             match rm.try_start_recording(&binding_id) {
-                Ok(()) => {
+                Ok(flush_rx) => {
                     debug!("Recording started in {:?}", recording_start_time.elapsed());
+                    start_flush_worker_if_needed(app, &binding_id, self.post_process, flush_rx);
                     // Small delay to ensure microphone stream is active
                     let app_clone = app.clone();
                     let rm_clone = Arc::clone(&rm);
@@ -512,6 +978,7 @@ impl ShortcutAction for TranscribeAction {
 
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
         let post_process = self.post_process;
+        let flush_session = take_flush_session(&binding_id);
 
         tauri::async_runtime::spawn(async move {
             let _guard = FinishGuard(ah.clone());
@@ -521,7 +988,31 @@ impl ShortcutAction for TranscribeAction {
             );
 
             let stop_recording_time = Instant::now();
-            if let Some(samples) = rm.stop_recording(&binding_id) {
+            let samples_opt = rm.stop_recording(&binding_id);
+
+            if let Some(session) = flush_session {
+                match &samples_opt {
+                    Some(samples) => debug!(
+                        "Flush recording stopped in {:?}, final sample count: {}",
+                        stop_recording_time.elapsed(),
+                        samples.len()
+                    ),
+                    None => debug!("No final samples retrieved from flush recording stop"),
+                }
+
+                finish_flush_session(
+                    ah.clone(),
+                    Arc::clone(&tm),
+                    Arc::clone(&hm),
+                    samples_opt,
+                    post_process,
+                    session,
+                )
+                .await;
+                return;
+            }
+
+            if let Some(samples) = samples_opt {
                 debug!(
                     "Recording stopped and samples retrieved in {:?}, sample count: {}",
                     stop_recording_time.elapsed(),

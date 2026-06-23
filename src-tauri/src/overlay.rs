@@ -31,8 +31,8 @@ tauri_panel! {
     })
 }
 
-const OVERLAY_WIDTH: f64 = 172.0;
-const OVERLAY_HEIGHT: f64 = 36.0;
+const OVERLAY_WIDTH: f64 = 184.0;
+const OVERLAY_HEIGHT: f64 = 42.0;
 
 #[cfg(target_os = "macos")]
 const OVERLAY_TOP_OFFSET: f64 = 46.0;
@@ -352,6 +352,13 @@ pub fn show_transcribing_overlay(app_handle: &AppHandle) {
 /// Shows the processing overlay window
 pub fn show_processing_overlay(app_handle: &AppHandle) {
     show_overlay_state(app_handle, "processing");
+}
+
+/// Updates the recording overlay's pending flush chunk count.
+pub fn emit_flush_pending_chunks(app_handle: &AppHandle, count: usize) {
+    if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
+        let _ = overlay_window.emit("flush-pending-chunks", count);
+    }
 }
 
 /// Updates the overlay window position based on current settings

@@ -18,6 +18,7 @@ const RecordingOverlay: React.FC = () => {
   const [isVisible, setIsVisible] = useState(false);
   const [state, setState] = useState<OverlayState>("recording");
   const [levels, setLevels] = useState<number[]>(Array(16).fill(0));
+  const [pendingFlushChunks, setPendingFlushChunks] = useState(0);
   const smoothedLevelsRef = useRef<number[]>(Array(16).fill(0));
   const direction = getLanguageDirection(i18n.language);
 
@@ -29,13 +30,26 @@ const RecordingOverlay: React.FC = () => {
         await syncLanguageFromSettings();
         const overlayState = event.payload as OverlayState;
         setState(overlayState);
+        if (overlayState === "recording") {
+          setPendingFlushChunks(0);
+        }
         setIsVisible(true);
       });
 
       // Listen for hide-overlay event from Rust
       const unlistenHide = await listen("hide-overlay", () => {
         setIsVisible(false);
+        setPendingFlushChunks(0);
       });
+
+      // Listen for pending flush chunk updates
+      const unlistenFlushChunks = await listen<number>(
+        "flush-pending-chunks",
+        (event) => {
+          const count = Number(event.payload) || 0;
+          setPendingFlushChunks(Math.max(0, count));
+        },
+      );
 
       // Listen for mic-level updates
       const unlistenLevel = await listen<number[]>("mic-level", (event) => {
@@ -55,6 +69,7 @@ const RecordingOverlay: React.FC = () => {
       return () => {
         unlistenShow();
         unlistenHide();
+        unlistenFlushChunks();
         unlistenLevel();
       };
     };
@@ -70,11 +85,21 @@ const RecordingOverlay: React.FC = () => {
     }
   };
 
+  const pendingFlushLabel =
+    pendingFlushChunks > 99 ? "99+" : String(pendingFlushChunks);
+
   return (
     <div
       dir={direction}
       className={`recording-overlay ${isVisible ? "fade-in" : ""}`}
     >
+      {pendingFlushChunks > 0 && (
+        <div className="flush-chunk-badge" aria-hidden="true">
+          <div className="flush-chunk-spinner" />
+          <div className="flush-chunk-count">{pendingFlushLabel}</div>
+        </div>
+      )}
+
       <div className="overlay-left">{getIcon()}</div>
 
       <div className="overlay-middle">

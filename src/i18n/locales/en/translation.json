@@ -251,6 +251,26 @@
         "label": "Experimental Features",
         "description": "Enable experimental features that are still in development."
       },
+      "flush": {
+        "title": "Flush",
+        "description": "Automatically transcribe and insert speech after a pause while recording continues.",
+        "options": {
+          "disabled": "Disabled",
+          "ms500": "After 500 ms",
+          "ms750": "After 750 ms",
+          "sec1": "After 1 second",
+          "sec2": "After 2 seconds",
+          "sec5": "After 5 seconds"
+        },
+        "context": {
+          "title": "LLM Flush Context",
+          "description": "Choose how much previous flushed text is sent to the LLM for context. The LLM should still return only the current chunk.",
+          "options": {
+            "fullSession": "Full session context",
+            "currentChunk": "Current chunk only"
+          }
+        }
+      },
       "lazyStreamClose": {
         "label": "Keep Mic Open Between Transcriptions",
         "description": "Keeps the microphone stream open for 30 seconds after recording stops, reducing latency for back-to-back transcriptions. May degrade Bluetooth audio quality while active."

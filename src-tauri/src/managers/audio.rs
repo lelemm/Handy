@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::Manager;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -383,7 +384,10 @@ impl AudioRecordingManager {
 
     /* ---------- recording --------------------------------------------------- */
 
-    pub fn try_start_recording(&self, binding_id: &str) -> Result<(), String> {
+    pub fn try_start_recording(
+        &self,
+        binding_id: &str,
+    ) -> Result<Option<UnboundedReceiver<Vec<f32>>>, String> {
         let mut state = self.state.lock().unwrap();
 
         if let RecordingState::Idle = *state {
@@ -399,13 +403,26 @@ impl AudioRecordingManager {
             }
 
             if let Some(rec) = self.recorder.lock().unwrap().as_ref() {
-                if rec.start().is_ok() {
+                let settings = get_settings(&self.app_handle);
+                let flush_gap_ms = if settings.experimental_enabled {
+                    settings.flush_gap.to_millis()
+                } else {
+                    None
+                };
+                let (start_result, flush_rx) = if let Some(ms) = flush_gap_ms {
+                    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                    (rec.start_with_flush(Some(ms), Some(tx)), Some(rx))
+                } else {
+                    (rec.start(), None)
+                };
+
+                if start_result.is_ok() {
                     *self.is_recording.lock().unwrap() = true;
                     *state = RecordingState::Recording {
                         binding_id: binding_id.to_string(),
                     };
                     debug!("Recording started for binding {binding_id}");
-                    return Ok(());
+                    return Ok(flush_rx);
                 }
             }
             Err("Recorder not available".to_string())

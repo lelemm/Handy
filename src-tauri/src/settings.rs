@@ -165,6 +165,49 @@ pub enum RecordingRetentionPeriod {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[serde(rename_all = "snake_case")]
+pub enum FlushGap {
+    Disabled,
+    Ms500,
+    Ms750,
+    Sec1,
+    Sec2,
+    Sec5,
+}
+
+impl Default for FlushGap {
+    fn default() -> Self {
+        FlushGap::Disabled
+    }
+}
+
+impl FlushGap {
+    pub fn to_millis(self) -> Option<u64> {
+        match self {
+            FlushGap::Disabled => None,
+            FlushGap::Ms500 => Some(500),
+            FlushGap::Ms750 => Some(750),
+            FlushGap::Sec1 => Some(1_000),
+            FlushGap::Sec2 => Some(2_000),
+            FlushGap::Sec5 => Some(5_000),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum FlushPostProcessContext {
+    FullSession,
+    CurrentChunk,
+}
+
+impl Default for FlushPostProcessContext {
+    fn default() -> Self {
+        FlushPostProcessContext::FullSession
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
 pub enum KeyboardImplementation {
     Tauri,
     HandyKeys,
@@ -430,6 +473,10 @@ pub struct AppSettings {
     pub whisper_gpu_device: i32,
     #[serde(default)]
     pub extra_recording_buffer_ms: u64,
+    #[serde(default)]
+    pub flush_gap: FlushGap,
+    #[serde(default)]
+    pub flush_post_process_context: FlushPostProcessContext,
 }
 
 fn default_model() -> String {
@@ -814,6 +861,8 @@ pub fn get_default_settings() -> AppSettings {
         ort_accelerator: OrtAcceleratorSetting::default(),
         whisper_gpu_device: default_whisper_gpu_device(),
         extra_recording_buffer_ms: 0,
+        flush_gap: FlushGap::default(),
+        flush_post_process_context: FlushPostProcessContext::default(),
     }
 }
 
@@ -956,6 +1005,27 @@ mod tests {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
         assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
+    }
+
+    #[test]
+    fn default_settings_disable_flush() {
+        let settings = get_default_settings();
+        assert_eq!(settings.flush_gap, FlushGap::Disabled);
+        assert_eq!(
+            settings.flush_post_process_context,
+            FlushPostProcessContext::FullSession
+        );
+        assert_eq!(settings.flush_gap.to_millis(), None);
+    }
+
+    #[test]
+    fn flush_gap_maps_to_milliseconds() {
+        assert_eq!(FlushGap::Disabled.to_millis(), None);
+        assert_eq!(FlushGap::Ms500.to_millis(), Some(500));
+        assert_eq!(FlushGap::Ms750.to_millis(), Some(750));
+        assert_eq!(FlushGap::Sec1.to_millis(), Some(1_000));
+        assert_eq!(FlushGap::Sec2.to_millis(), Some(2_000));
+        assert_eq!(FlushGap::Sec5.to_millis(), Some(5_000));
     }
 
     #[test]
