@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   AppSettings as Settings,
   AudioDevice,
+  FlushGap,
+  FlushPostProcessContext,
   WhisperAcceleratorSetting,
   OrtAcceleratorSetting,
 } from "@/bindings";
@@ -155,6 +157,11 @@ const settingUpdaters: {
     commands.changeWhisperGpuDevice(value as number),
   extra_recording_buffer_ms: (value) =>
     commands.changeExtraRecordingBufferSetting(value as number),
+  flush_gap: (value) => commands.changeFlushGapSetting(value as FlushGap),
+  flush_post_process_context: (value) =>
+    commands.changeFlushPostProcessContextSetting(
+      value as FlushPostProcessContext,
+    ),
 };
 
 export const useSettingsStore = create<SettingsStore>()(

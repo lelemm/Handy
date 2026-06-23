@@ -588,7 +588,11 @@ fn should_send_auto_submit(auto_submit: bool, paste_method: PasteMethod) -> bool
     auto_submit && paste_method != PasteMethod::None
 }
 
-pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
+fn paste_with_auto_submit(
+    text: String,
+    app_handle: AppHandle,
+    allow_auto_submit: bool,
+) -> Result<(), String> {
     let settings = get_settings(&app_handle);
     let paste_method = settings.paste_method;
     let paste_delay_ms = settings.paste_delay_ms;
@@ -646,7 +650,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
         }
     }
 
-    if should_send_auto_submit(settings.auto_submit, paste_method) {
+    if allow_auto_submit && should_send_auto_submit(settings.auto_submit, paste_method) {
         std::thread::sleep(Duration::from_millis(50));
         send_return_key(&mut enigo, settings.auto_submit_key)?;
     }
@@ -660,6 +664,32 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
+    paste_with_auto_submit(text, app_handle, true)
+}
+
+pub fn paste_without_auto_submit(text: String, app_handle: AppHandle) -> Result<(), String> {
+    paste_with_auto_submit(text, app_handle, false)
+}
+
+pub fn send_auto_submit_if_enabled(app_handle: AppHandle) -> Result<(), String> {
+    let settings = get_settings(&app_handle);
+    if !should_send_auto_submit(settings.auto_submit, settings.paste_method) {
+        return Ok(());
+    }
+
+    let enigo_state = app_handle
+        .try_state::<EnigoState>()
+        .ok_or("Enigo state not initialized")?;
+    let mut enigo = enigo_state
+        .0
+        .lock()
+        .map_err(|e| format!("Failed to lock Enigo: {}", e))?;
+
+    std::thread::sleep(Duration::from_millis(50));
+    send_return_key(&mut enigo, settings.auto_submit_key)
 }
 
 #[cfg(test)]
