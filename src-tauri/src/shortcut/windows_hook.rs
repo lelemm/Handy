@@ -1,7 +1,7 @@
 //! Windows low-level keyboard hook shortcut implementation.
 //!
 //! This backend observes host keyboard input with `WH_KEYBOARD_LL` and always
-//! forwards events to the next hook. That lets Handy react while focused apps
+//! forwards events to the next hook. That lets (not)Handy react while focused apps
 //! like RDP still receive the same shortcut.
 
 use log::{debug, error, info};

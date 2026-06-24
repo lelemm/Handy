@@ -100,7 +100,7 @@
     },
     "permissions": {
       "title": "Необходими разрешения",
-      "description": "Handy се нуждае от няколко разрешения, за да работи правилно.",
+      "description": "(not)Handy се нуждае от няколко разрешения, за да работи правилно.",
       "microphone": {
         "title": "Достъп до микрофон",
         "description": "Необходим е, за да чуе гласа ви при транскрипция."
@@ -158,7 +158,7 @@
     "general": {
       "title": "Общи",
       "shortcut": {
-        "title": "Бързи клавиши на Handy",
+        "title": "Бързи клавиши на (not)Handy",
         "description": "Настройте клавишни комбинации за стартиране на запис за реч към текст",
         "loading": "Зареждане на бързите клавиши...",
         "none": "Няма настроени бързи клавиши",
@@ -276,11 +276,11 @@
       },
       "autostart": {
         "label": "Стартиране със системата",
-        "description": "Автоматично стартиране на Handy при влизане в профила ви."
+        "description": "Автоматично стартиране на (not)Handy при влизане в профила ви."
       },
       "showTrayIcon": {
         "label": "Икона в системната област",
-        "description": "Показване на иконата на Handy в системната област."
+        "description": "Показване на иконата на (not)Handy в системната област."
       },
       "overlay": {
         "title": "Позиция на наслагването",
@@ -356,6 +356,26 @@
         "add": "Добавяне",
         "remove": "Премахване на {{word}}",
         "duplicate": "„{{word}}“ вече съществува"
+      },
+      "flush": {
+        "title": "Flush",
+        "description": "Automatically transcribe and insert speech after a pause while recording continues.",
+        "options": {
+          "disabled": "Disabled",
+          "ms500": "After 500 ms",
+          "ms750": "After 750 ms",
+          "sec1": "After 1 second",
+          "sec2": "After 2 seconds",
+          "sec5": "After 5 seconds"
+        },
+        "context": {
+          "title": "LLM Flush Context",
+          "description": "Choose how much previous flushed text is sent to the LLM for context. The LLM should still return only the current chunk.",
+          "options": {
+            "fullSession": "Full session context",
+            "currentChunk": "Current chunk only"
+          }
+        }
       }
     },
     "postProcessing": {
@@ -456,7 +476,7 @@
       },
       "updateChecks": {
         "label": "Проверка за актуализации",
-        "description": "Автоматична проверка за нови версии на Handy"
+        "description": "Автоматична проверка за нови версии на (not)Handy"
       },
       "soundTheme": {
         "label": "Звукова тема",
@@ -524,11 +544,11 @@
       "title": "За приложението",
       "version": {
         "title": "Версия",
-        "description": "Текуща версия на Handy"
+        "description": "Текуща версия на (not)Handy"
       },
       "appDataDirectory": {
         "title": "Папка с данни на приложението",
-        "description": "Мястото, където Handy съхранява данните си"
+        "description": "Мястото, където (not)Handy съхранява данните си"
       },
       "sourceCode": {
         "title": "Изходен код",
@@ -537,7 +557,7 @@
       },
       "supportDevelopment": {
         "title": "Подкрепете разработката",
-        "description": "Помогнете ни да продължим да развиваме Handy",
+        "description": "Помогнете ни да продължим да развиваме (not)Handy",
         "button": "Дарение"
       },
       "acknowledgments": {
@@ -545,7 +565,7 @@
         "whisper": {
           "title": "Whisper.cpp",
           "description": "Високопроизводително изпълнение на автоматичния модел за разпознаване на реч Whisper на OpenAI",
-          "details": "Handy използва Whisper.cpp за бързо локално реч-към-текст. Благодарности на Georgi Gerganov и сътрудниците за отличната работа."
+          "details": "(not)Handy използва Whisper.cpp за бързо локално реч-към-текст. Благодарности на Georgi Gerganov и сътрудниците за отличната работа."
         }
       }
     }
@@ -593,7 +613,7 @@
   },
   "accessibility": {
     "permissionsRequired": "Необходими са разрешения за достъпност",
-    "permissionsDescription": "Handy се нуждае от разрешения за достъпност, за да въвежда транскрибирания текст.",
+    "permissionsDescription": "(not)Handy се нуждае от разрешения за достъпност, за да въвежда транскрибирания текст.",
     "openSettings": "Отваряне на системните настройки",
     "dismiss": "Затваряне"
   },
@@ -616,7 +636,7 @@
   },
   "appLanguage": {
     "title": "Език на приложението",
-    "description": "Промяна на езика на интерфейса на Handy"
+    "description": "Промяна на езика на интерфейса на (not)Handy"
   },
   "overlay": {
     "transcribing": "Транскрибиране...",

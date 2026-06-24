@@ -1,7 +1,7 @@
 //! Windows Interception driver shortcut implementation.
 //!
 //! This backend uses the optional Interception driver/API when
-//! `interception.dll` is available next to Handy or on PATH. It observes
+//! `interception.dll` is available next to (not)Handy or on PATH. It observes
 //! keyboard scan codes below normal Win32 hooks, immediately sends each stroke
 //! back unchanged, and uses the shared Windows shortcut tracker for matching.
 
@@ -99,7 +99,7 @@ impl InterceptionApi {
     fn load() -> Result<Self, String> {
         let library = unsafe { Library::new("interception.dll") }.map_err(|err| {
             format!(
-                "Failed to load interception.dll: {err}. Put the x64 Interception DLL next to handy.exe and install the Interception driver as Administrator."
+                "Failed to load interception.dll: {err}. Put the x64 Interception DLL next to not-handy.exe and install the Interception driver as Administrator."
             )
         })?;
 

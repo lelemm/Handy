@@ -4,9 +4,9 @@
   /* Design tokens */
   --color-text: #0f0f0f;
   --color-background: #fbfbfb;
-  --color-background-ui: #da5893;
-  --color-logo-primary: #faa2ca;
-  --color-logo-stroke: #382731;
+  --color-background-ui: #90e4c1;
+  --color-logo-primary: #90e4c1;
+  --color-logo-stroke: #153830;
   --color-text-stroke: #f6f6f6;
   --color-mid-gray: #808080;
 }
@@ -20,8 +20,8 @@
   /* Colors - Light Theme */
   /* --color-text: #0f0f0f;
   --color-background: #fbfbfb;
-  --color-logo-primary: #FAA2CA;
-  --color-logo-stroke: #382731;
+  --color-logo-primary: #90e4c1;
+  --color-logo-stroke: #153830;
   --color-text-stroke: #f6f6f6; */
 
   /* Typography settings */
@@ -62,8 +62,8 @@
     /* Colors - Dark Theme */
     --color-text: #fbfbfb;
     --color-background: #2c2b29;
-    --color-logo-primary: #f28cbb;
-    --color-logo-stroke: #fad1ed;
+    --color-logo-primary: #90e4c1;
+    --color-logo-stroke: #d9fff2;
     /* Just a bit darker than the (already dark) background, keeping its warm tint */
     --color-log-surface: color-mix(in srgb, var(--color-background), black 15%);
   }

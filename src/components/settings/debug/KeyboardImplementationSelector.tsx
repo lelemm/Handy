@@ -9,7 +9,7 @@ import { useOsType } from "@/hooks/useOsType";
 
 const KEYBOARD_IMPLEMENTATION_OPTIONS: DropdownOption[] = [
   { value: "tauri", label: "Tauri Global Shortcut" },
-  { value: "handy_keys", label: "Handy Keys" },
+  { value: "handy_keys", label: "Native Key Hook" },
 ];
 
 interface KeyboardImplementationSelectorProps {
