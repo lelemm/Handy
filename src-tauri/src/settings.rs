@@ -211,6 +211,8 @@ impl Default for FlushPostProcessContext {
 pub enum KeyboardImplementation {
     Tauri,
     HandyKeys,
+    WindowsLowLevelHook,
+    WindowsInterceptionHook,
 }
 
 impl Default for KeyboardImplementation {

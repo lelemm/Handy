@@ -11,7 +11,11 @@
 
 mod handler;
 pub mod handy_keys;
+#[cfg(target_os = "windows")]
+pub mod interception_hook;
 mod tauri_impl;
+#[cfg(target_os = "windows")]
+pub mod windows_hook;
 
 use log::{error, info, warn};
 use serde::Serialize;
@@ -53,6 +57,61 @@ pub fn init_shortcuts(app: &AppHandle) {
                 tauri_impl::init_shortcuts(app);
             }
         }
+        KeyboardImplementation::WindowsLowLevelHook => {
+            #[cfg(target_os = "windows")]
+            {
+                if let Err(e) = windows_hook::init_shortcuts(app) {
+                    error!(
+                        "Failed to initialize Windows low-level hook shortcuts: {}",
+                        e
+                    );
+                    warn!("Falling back to Tauri global shortcut implementation and saving fallback to settings");
+
+                    let mut settings = settings::get_settings(app);
+                    settings.keyboard_implementation = KeyboardImplementation::Tauri;
+                    settings::write_settings(app, settings);
+
+                    tauri_impl::init_shortcuts(app);
+                }
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                warn!("Windows low-level hook selected on a non-Windows platform; falling back to Tauri");
+
+                let mut settings = settings::get_settings(app);
+                settings.keyboard_implementation = KeyboardImplementation::Tauri;
+                settings::write_settings(app, settings);
+
+                tauri_impl::init_shortcuts(app);
+            }
+        }
+        KeyboardImplementation::WindowsInterceptionHook => {
+            #[cfg(target_os = "windows")]
+            {
+                if let Err(e) = interception_hook::init_shortcuts(app) {
+                    error!("Failed to initialize Windows Interception shortcuts: {}", e);
+                    warn!("Falling back to Tauri global shortcut implementation and saving fallback to settings");
+
+                    let mut settings = settings::get_settings(app);
+                    settings.keyboard_implementation = KeyboardImplementation::Tauri;
+                    settings::write_settings(app, settings);
+
+                    tauri_impl::init_shortcuts(app);
+                }
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                warn!("Windows Interception selected on a non-Windows platform; falling back to Tauri");
+
+                let mut settings = settings::get_settings(app);
+                settings.keyboard_implementation = KeyboardImplementation::Tauri;
+                settings::write_settings(app, settings);
+
+                tauri_impl::init_shortcuts(app);
+            }
+        }
     }
 }
 
@@ -62,6 +121,14 @@ pub fn register_cancel_shortcut(app: &AppHandle) {
     match settings.keyboard_implementation {
         KeyboardImplementation::Tauri => tauri_impl::register_cancel_shortcut(app),
         KeyboardImplementation::HandyKeys => handy_keys::register_cancel_shortcut(app),
+        KeyboardImplementation::WindowsLowLevelHook => {
+            #[cfg(target_os = "windows")]
+            windows_hook::register_cancel_shortcut(app);
+        }
+        KeyboardImplementation::WindowsInterceptionHook => {
+            #[cfg(target_os = "windows")]
+            interception_hook::register_cancel_shortcut(app);
+        }
     }
 }
 
@@ -71,6 +138,14 @@ pub fn unregister_cancel_shortcut(app: &AppHandle) {
     match settings.keyboard_implementation {
         KeyboardImplementation::Tauri => tauri_impl::unregister_cancel_shortcut(app),
         KeyboardImplementation::HandyKeys => handy_keys::unregister_cancel_shortcut(app),
+        KeyboardImplementation::WindowsLowLevelHook => {
+            #[cfg(target_os = "windows")]
+            windows_hook::unregister_cancel_shortcut(app);
+        }
+        KeyboardImplementation::WindowsInterceptionHook => {
+            #[cfg(target_os = "windows")]
+            interception_hook::unregister_cancel_shortcut(app);
+        }
     }
 }
 
@@ -80,6 +155,30 @@ pub fn register_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<()
     match settings.keyboard_implementation {
         KeyboardImplementation::Tauri => tauri_impl::register_shortcut(app, binding),
         KeyboardImplementation::HandyKeys => handy_keys::register_shortcut(app, binding),
+        KeyboardImplementation::WindowsLowLevelHook => {
+            #[cfg(target_os = "windows")]
+            {
+                windows_hook::register_shortcut(app, binding)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = app;
+                let _ = binding;
+                Err("Windows low-level hook is only available on Windows".into())
+            }
+        }
+        KeyboardImplementation::WindowsInterceptionHook => {
+            #[cfg(target_os = "windows")]
+            {
+                interception_hook::register_shortcut(app, binding)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = app;
+                let _ = binding;
+                Err("Windows Interception hook is only available on Windows".into())
+            }
+        }
     }
 }
 
@@ -89,6 +188,30 @@ pub fn unregister_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<
     match settings.keyboard_implementation {
         KeyboardImplementation::Tauri => tauri_impl::unregister_shortcut(app, binding),
         KeyboardImplementation::HandyKeys => handy_keys::unregister_shortcut(app, binding),
+        KeyboardImplementation::WindowsLowLevelHook => {
+            #[cfg(target_os = "windows")]
+            {
+                windows_hook::unregister_shortcut(app, binding)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = app;
+                let _ = binding;
+                Err("Windows low-level hook is only available on Windows".into())
+            }
+        }
+        KeyboardImplementation::WindowsInterceptionHook => {
+            #[cfg(target_os = "windows")]
+            {
+                interception_hook::unregister_shortcut(app, binding)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = app;
+                let _ = binding;
+                Err("Windows Interception hook is only available on Windows".into())
+            }
+        }
     }
 }
 
@@ -276,21 +399,38 @@ pub fn change_keyboard_implementation_setting(
 
     // Unregister all shortcuts from the current implementation
     unregister_all_shortcuts(&app, current_impl);
+    if current_impl == KeyboardImplementation::WindowsLowLevelHook {
+        #[cfg(target_os = "windows")]
+        windows_hook::shutdown(&app);
+    }
+    if current_impl == KeyboardImplementation::WindowsInterceptionHook {
+        #[cfg(target_os = "windows")]
+        interception_hook::shutdown(&app);
+    }
 
     // Update the setting
     let mut settings = settings::get_settings(&app);
     settings.keyboard_implementation = new_impl;
     settings::write_settings(&app, settings);
 
-    // Initialize new implementation if needed (HandyKeys needs state)
-    if new_impl == KeyboardImplementation::HandyKeys {
-        if initialize_handy_keys_with_rollback(&app)? {
-            // Shortcuts already registered during init
-            return Ok(ImplementationChangeResult {
-                success: true,
-                reset_bindings: vec![],
-            });
+    // Initialize new implementation if needed (some backends own manager threads)
+    match new_impl {
+        KeyboardImplementation::HandyKeys => {
+            if initialize_handy_keys_with_rollback(&app)? {
+                // Shortcuts already registered during init
+                return Ok(ImplementationChangeResult {
+                    success: true,
+                    reset_bindings: vec![],
+                });
+            }
         }
+        KeyboardImplementation::WindowsLowLevelHook => {
+            initialize_windows_hook_with_rollback(&app)?;
+        }
+        KeyboardImplementation::WindowsInterceptionHook => {
+            initialize_interception_hook_with_rollback(&app)?;
+        }
+        KeyboardImplementation::Tauri => {}
     }
 
     // Register all shortcuts with new implementation, resetting invalid ones
@@ -322,6 +462,8 @@ pub fn get_keyboard_implementation(app: AppHandle) -> String {
     match settings.keyboard_implementation {
         KeyboardImplementation::Tauri => "tauri".to_string(),
         KeyboardImplementation::HandyKeys => "handy_keys".to_string(),
+        KeyboardImplementation::WindowsLowLevelHook => "windows_low_level_hook".to_string(),
+        KeyboardImplementation::WindowsInterceptionHook => "windows_interception_hook".to_string(),
     }
 }
 
@@ -337,6 +479,28 @@ fn validate_shortcut_for_implementation(
     match implementation {
         KeyboardImplementation::Tauri => tauri_impl::validate_shortcut(raw),
         KeyboardImplementation::HandyKeys => handy_keys::validate_shortcut(raw),
+        KeyboardImplementation::WindowsLowLevelHook => {
+            #[cfg(target_os = "windows")]
+            {
+                windows_hook::validate_shortcut(raw)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = raw;
+                Err("Windows low-level hook is only available on Windows".into())
+            }
+        }
+        KeyboardImplementation::WindowsInterceptionHook => {
+            #[cfg(target_os = "windows")]
+            {
+                interception_hook::validate_shortcut(raw)
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = raw;
+                Err("Windows Interception hook is only available on Windows".into())
+            }
+        }
     }
 }
 
@@ -345,6 +509,28 @@ fn parse_keyboard_implementation(s: &str) -> KeyboardImplementation {
     match s {
         "tauri" => KeyboardImplementation::Tauri,
         "handy_keys" => KeyboardImplementation::HandyKeys,
+        "windows_low_level_hook" => {
+            #[cfg(target_os = "windows")]
+            {
+                KeyboardImplementation::WindowsLowLevelHook
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                warn!("Windows low-level hook requested on a non-Windows platform");
+                KeyboardImplementation::Tauri
+            }
+        }
+        "windows_interception_hook" => {
+            #[cfg(target_os = "windows")]
+            {
+                KeyboardImplementation::WindowsInterceptionHook
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                warn!("Windows Interception hook requested on a non-Windows platform");
+                KeyboardImplementation::Tauri
+            }
+        }
         other => {
             warn!(
                 "Invalid keyboard implementation '{}', defaulting to tauri",
@@ -368,6 +554,30 @@ fn unregister_all_shortcuts(app: &AppHandle, implementation: KeyboardImplementat
         let result = match implementation {
             KeyboardImplementation::Tauri => tauri_impl::unregister_shortcut(app, binding),
             KeyboardImplementation::HandyKeys => handy_keys::unregister_shortcut(app, binding),
+            KeyboardImplementation::WindowsLowLevelHook => {
+                #[cfg(target_os = "windows")]
+                {
+                    windows_hook::unregister_shortcut(app, binding)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = app;
+                    let _ = binding;
+                    Ok(())
+                }
+            }
+            KeyboardImplementation::WindowsInterceptionHook => {
+                #[cfg(target_os = "windows")]
+                {
+                    interception_hook::unregister_shortcut(app, binding)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = app;
+                    let _ = binding;
+                    Ok(())
+                }
+            }
         };
 
         if let Err(e) = result {
@@ -426,6 +636,30 @@ fn register_all_shortcuts_for_implementation(
         let result = match implementation {
             KeyboardImplementation::Tauri => tauri_impl::register_shortcut(app, binding),
             KeyboardImplementation::HandyKeys => handy_keys::register_shortcut(app, binding),
+            KeyboardImplementation::WindowsLowLevelHook => {
+                #[cfg(target_os = "windows")]
+                {
+                    windows_hook::register_shortcut(app, binding)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = app;
+                    let _ = binding;
+                    Err("Windows low-level hook is only available on Windows".into())
+                }
+            }
+            KeyboardImplementation::WindowsInterceptionHook => {
+                #[cfg(target_os = "windows")]
+                {
+                    interception_hook::register_shortcut(app, binding)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = app;
+                    let _ = binding;
+                    Err("Windows Interception hook is only available on Windows".into())
+                }
+            }
         };
 
         if let Err(e) = result {
@@ -465,6 +699,66 @@ fn initialize_handy_keys_with_rollback(app: &AppHandle) -> Result<bool, String> 
 
     // init_shortcuts already registered shortcuts
     Ok(true)
+}
+
+/// Initialize Windows low-level hook if not already initialized, with rollback on failure
+fn initialize_windows_hook_with_rollback(app: &AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(e) = windows_hook::init_state(app) {
+            error!("Failed to initialize Windows low-level hook: {}", e);
+            let mut settings = settings::get_settings(app);
+            settings.keyboard_implementation = KeyboardImplementation::Tauri;
+            settings::write_settings(app, settings);
+            tauri_impl::init_shortcuts(app);
+            return Err(format!(
+                "Failed to initialize Windows low-level hook: {}. Reverted to Tauri.",
+                e
+            ));
+        }
+
+        // Caller still validates/resets and registers the active bindings.
+        Ok(false)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut settings = settings::get_settings(app);
+        settings.keyboard_implementation = KeyboardImplementation::Tauri;
+        settings::write_settings(app, settings);
+        tauri_impl::init_shortcuts(app);
+        Err("Windows low-level hook is only available on Windows".into())
+    }
+}
+
+/// Initialize Windows Interception hook if not already initialized, with rollback on failure
+fn initialize_interception_hook_with_rollback(app: &AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(e) = interception_hook::init_state(app) {
+            error!("Failed to initialize Windows Interception hook: {}", e);
+            let mut settings = settings::get_settings(app);
+            settings.keyboard_implementation = KeyboardImplementation::Tauri;
+            settings::write_settings(app, settings);
+            tauri_impl::init_shortcuts(app);
+            return Err(format!(
+                "Failed to initialize Windows Interception hook: {}. Reverted to Tauri.",
+                e
+            ));
+        }
+
+        // Caller still validates/resets and registers the active bindings.
+        Ok(false)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut settings = settings::get_settings(app);
+        settings.keyboard_implementation = KeyboardImplementation::Tauri;
+        settings::write_settings(app, settings);
+        tauri_impl::init_shortcuts(app);
+        Err("Windows Interception hook is only available on Windows".into())
+    }
 }
 
 // ============================================================================
